@@ -1,22 +1,23 @@
 var expect = require('expect.js');
-var fs = require('graceful-fs');
+var fs = require('../../lib/util/fs');
 var path = require('path');
 var mkdirp = require('mkdirp');
 var mout = require('mout');
 var Q = require('q');
-var rimraf = require('rimraf');
+var rimraf = require('../../lib/util/rimraf');
 var RegistryClient = require('bower-registry-client');
 var Logger = require('bower-logger');
 var resolverFactory = require('../../lib/core/resolverFactory');
 var resolvers = require('../../lib/core/resolvers');
 var defaultConfig = require('../../lib/config');
+var helpers = require('../helpers');
 
 describe('resolverFactory', function () {
     var tempSource;
     var logger = new Logger();
-    var registryClient = new RegistryClient(mout.object.fillIn({
-        cache: defaultConfig._registry
-    }, defaultConfig));
+    var registryClient = new RegistryClient(defaultConfig({
+        cache: defaultConfig()._registry
+    }));
 
     afterEach(function (next) {
         logger.removeAllListeners();
@@ -30,11 +31,11 @@ describe('resolverFactory', function () {
     });
 
     after(function (next) {
-        rimraf('dejavu', next);
+        rimraf('pure', next);
     });
 
-    function callFactory(decEndpoint, config) {
-        return resolverFactory(decEndpoint, config || defaultConfig, logger, registryClient);
+    function callFactory(decEndpoint, config, skipRegistry) {
+        return resolverFactory(decEndpoint, { config: defaultConfig(config), logger: logger }, skipRegistry ? undefined : registryClient);
     }
 
     it('should recognize git remote endpoints correctly', function (next) {
@@ -303,6 +304,11 @@ describe('resolverFactory', function () {
         temp = path.resolve(__dirname, '../assets/package-a');
         endpoints[temp] = temp;
 
+        // Absolute path that ends with a /
+        // See: https://github.com/bower/bower/issues/898
+        temp = path.resolve(__dirname, '../assets/package-a') + '/';
+        endpoints[temp] = temp;
+
         // Relative path
         endpoints[__dirname + '/../assets/package-a'] = temp;
 
@@ -334,12 +340,91 @@ describe('resolverFactory', function () {
         .done();
     });
 
+    if (!helpers.hasSvn())
+        describe.skip('should recognize svn remote endpoints correctly', function() {});
+    else it('should recognize svn remote endpoints correctly', function (next) {
+        var promise = Q.resolve();
+        var endpoints;
+
+        endpoints = {
+            // svn:
+            'svn://hostname.com/user/project': 'http://hostname.com/user/project',
+            'svn://hostname.com/user/project/': 'http://hostname.com/user/project',
+
+            // svn@:
+            'svn://svn@hostname.com:user/project': 'http://svn@hostname.com:user/project',
+            'svn://svn@hostname.com:user/project/': 'http://svn@hostname.com:user/project',
+
+            // svn+http
+            'svn+http://hostname.com/project/blah': 'http://hostname.com/project/blah',
+            'svn+http://hostname.com/project/blah/': 'http://hostname.com/project/blah',
+            'svn+http://user@hostname.com/project/blah': 'http://user@hostname.com/project/blah',
+            'svn+http://user@hostname.com/project/blah/': 'http://user@hostname.com/project/blah',
+
+            // svn+https
+            'svn+https://hostname.com/project/blah': 'https://hostname.com/project/blah',
+            'svn+https://hostname.com/project/blah/': 'https://hostname.com/project/blah',
+            'svn+https://user@hostname.com/project/blah': 'https://user@hostname.com/project/blah',
+            'svn+https://user@hostname.com/project/blah/': 'https://user@hostname.com/project/blah',
+
+            // svn+ssh
+            'svn+ssh://hostname.com/project/blah': 'svn+ssh://hostname.com/project/blah',
+            'svn+ssh://hostname.com/project/blah/': 'svn+ssh://hostname.com/project/blah',
+            'svn+ssh://user@hostname.com/project/blah': 'svn+ssh://user@hostname.com/project/blah',
+            'svn+ssh://user@hostname.com/project/blah/': 'svn+ssh://user@hostname.com/project/blah',
+
+            // svn+file
+            'svn+file:///project/blah': 'file:///project/blah',
+            'svn+file:///project/blah/': 'file:///project/blah'
+        };
+
+        mout.object.forOwn(endpoints, function (value, key) {
+            // Test without name and target
+            promise = promise.then(function () {
+                return callFactory({ source: key });
+            })
+            .then(function (resolver) {
+                expect(resolver).to.be.a(resolvers.Svn);
+                expect(resolver).to.not.be(resolvers.GitHub);
+                expect(resolvers.Svn.getSource(resolver.getSource())).to.equal(value);
+                expect(resolver.getTarget()).to.equal('*');
+            });
+
+            // Test with target
+            promise = promise.then(function () {
+                return callFactory({ source: key, target: 'commit-ish' });
+            })
+            .then(function (resolver) {
+                expect(resolver).to.be.a(resolvers.Svn);
+                expect(resolver).to.not.be(resolvers.GitHub);
+                expect(resolvers.Svn.getSource(resolver.getSource())).to.equal(value);
+                expect(resolver.getTarget()).to.equal('commit-ish');
+            });
+
+            // Test with name
+            promise = promise.then(function () {
+                return callFactory({ name: 'foo', source: key });
+            })
+            .then(function (resolver) {
+                expect(resolver).to.be.a(resolvers.Svn);
+                expect(resolver).to.not.be(resolvers.GitHub);
+                expect(resolvers.Svn.getSource(resolver.getSource())).to.equal(value);
+                expect(resolver.getName()).to.equal('foo');
+                expect(resolver.getTarget()).to.equal('*');
+            });
+        });
+
+        promise
+        .then(next.bind(next, null))
+        .done();
+    });
+
     it('should recognize local fs files/folder endpoints correctly', function (next) {
         var promise = Q.resolve();
         var endpoints;
         var temp;
 
-        tempSource = path.resolve(__dirname, '../assets/tmp');
+        tempSource = path.resolve(__dirname, '../tmp/tmp');
         mkdirp.sync(tempSource);
         fs.writeFileSync(path.join(tempSource, '.git'), 'foo');
         fs.writeFileSync(path.join(tempSource, 'file.with.multiple.dots'), 'foo');
@@ -349,7 +434,7 @@ describe('resolverFactory', function () {
         // Absolute path to folder with .git file
         endpoints[tempSource] = tempSource;
         // Relative path to folder with .git file
-        endpoints[__dirname + '/../assets/tmp'] = tempSource;
+        endpoints[__dirname + '/../tmp/tmp'] = tempSource;
 
         // Absolute path to folder
         temp = path.resolve(__dirname, '../assets/test-temp-dir');
@@ -441,32 +526,67 @@ describe('resolverFactory', function () {
         .done();
     });
 
-    it('should recognize registry endpoints correctly', function (next) {
-        // Create a 'dejavu' file at the root to prevent regressions of #666
-        fs.writeFileSync('dejavu', 'foo');
+    it('should recognize URL endpoints correctly', function (next) {
+        var promise = Q.resolve();
+        var endpoints;
 
-        callFactory({ source: 'dejavu' })
+        endpoints = [
+            'http://bower.io/foo.js',
+            'https://bower.io/foo.js'
+        ];
+
+        endpoints.forEach(function (source) {
+            // Test without name
+            promise = promise.then(function () {
+                return callFactory({ source: source });
+            })
+            .then(function (resolver) {
+                expect(resolver).to.be.a(resolvers.Url);
+                expect(resolver.getSource()).to.equal(source);
+            });
+
+            // Test with name
+            promise = promise.then(function () {
+                return callFactory({ name: 'foo', source: source });
+            })
+            .then(function (resolver) {
+                expect(resolver).to.be.a(resolvers.Url);
+                expect(resolver.getName()).to.equal('foo');
+                expect(resolver.getSource()).to.equal(source);
+            });
+        });
+
+        promise
+        .then(next.bind(next, null))
+        .done();
+    });
+
+    it('should recognize registry endpoints correctly', function (next) {
+        // Create a 'pure' file at the root to prevent regressions of #666
+        fs.writeFileSync('pure', 'foo');
+
+        callFactory({ source: 'pure' })
         .then(function (resolver) {
             expect(resolver).to.be.a(resolvers.GitRemote);
-            expect(resolver.getSource()).to.equal('git://github.com/IndigoUnited/dejavu.git');
+            expect(resolver.getSource()).to.equal('git://github.com/yui/pure-release.git');
             expect(resolver.getTarget()).to.equal('*');
         })
         .then(function () {
             // Test with name
-            return callFactory({ source: 'dejavu', name: 'foo' })
+            return callFactory({ source: 'pure', name: 'foo' })
             .then(function (resolver) {
                 expect(resolver).to.be.a(resolvers.GitRemote);
-                expect(resolver.getSource()).to.equal('git://github.com/IndigoUnited/dejavu.git');
+                expect(resolver.getSource()).to.equal('git://github.com/yui/pure-release.git');
                 expect(resolver.getName()).to.equal('foo');
                 expect(resolver.getTarget()).to.equal('*');
             });
         })
         .then(function () {
             // Test with target
-            return callFactory({ source: 'dejavu', target: '~2.0.0' })
+            return callFactory({ source: 'pure', target: '~0.4.0' })
             .then(function (resolver) {
                 expect(resolver).to.be.a(resolvers.GitRemote);
-                expect(resolver.getTarget()).to.equal('~2.0.0');
+                expect(resolver.getTarget()).to.equal('~0.4.0');
 
                 next();
             });
@@ -488,27 +608,24 @@ describe('resolverFactory', function () {
         .done();
     });
 
-    it('should set registry to true on the decomposed endpoint if fetched from the registry', function (next) {
-        var decEndpoint = { source: 'dejavu' };
+    // it('should set registry to true on the decomposed endpoint if fetched from the registry', function (next) {
+    //     var decEndpoint = { source: 'pure' };
 
-        callFactory(decEndpoint)
-        .then(function () {
-            expect(decEndpoint.registry).to.be(true);
-            next();
-        })
-        .done();
-    });
+    //     return callFactory(decEndpoint, { resolvers: ['sample-custom-resolver'] })
+    //     .then(function () {
+    //         next();
+    //     })
+    //     .done();
+    // });
 
     it('should use the configured shorthand resolver', function (next) {
         callFactory({ source: 'bower/bower' })
         .then(function (resolver) {
-            var config;
+            var config = {
+                shorthandResolver: 'git://bower.io/{{owner}}/{{package}}/{{shorthand}}'
+            };
 
             expect(resolver.getSource()).to.equal('git://github.com/bower/bower.git');
-
-            config = mout.object.fillIn({
-                shorthandResolver: 'git://bower.io/{{owner}}/{{package}}/{{shorthand}}'
-            }, defaultConfig);
 
             return callFactory({ source: 'IndigoUnited/promptly' }, config);
         })
@@ -534,7 +651,7 @@ describe('resolverFactory', function () {
 
 
     it('should error out if there\'s no suitable resolver for a given source', function (next) {
-        resolverFactory({ source: 'some-package-that-will-never-exist' }, defaultConfig, logger)
+        callFactory({ source: 'some-package-that-will-never-exist' }, undefined, true)
         .then(function () {
             throw new Error('Should have failed');
         }, function (err) {
